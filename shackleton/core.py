@@ -27,7 +27,10 @@ class TableShack:
         return self._write_meta(df, self._replace_records)
 
     def lazy_read(self, path: Path) -> pl.LazyFrame:
-        o = (pl.scan_ipc if self.ipc else pl.scan_parquet)(path)
+        if self.ipc:
+            o = pl.scan_ipc(path)
+        else:
+            o = pl.scan_parquet(path, hive_partitioning=False)
         if self.id_col:
             return o.set_sorted(self.id_col)
         return o
@@ -77,6 +80,7 @@ class TableShack:
             return pl.concat([old_df, df])
 
     def _replace_records(self, df: pl.LazyFrame, old_df: pl.LazyFrame) -> pl.LazyFrame:
+        assert self.id_col is not None, "can only replace id'd records"
         return old_df.merge_sorted(df, key=self.id_col).unique(
             subset=self.id_col, keep="last"
         )
@@ -85,7 +89,7 @@ class TableShack:
         self,
         df: pl.DataFrame,
         fun: Callable[[pl.LazyFrame, pl.LazyFrame], pl.LazyFrame],
-        subdirs: tuple[str] = (),
+        subdirs: tuple[str, ...] = (),
         partitioned=False,
     ):
         if self.partition_cols and not partitioned:
@@ -103,7 +107,7 @@ class TableShack:
         self._add_compression(fun)(out, true_path)
 
     def _gb_handle(self, df: pl.DataFrame, fun):
-        for gid, gdf in df.groupby(self.partition_cols):
+        for gid, gdf in df.group_by(self.partition_cols):
             hive_names = [f"{k}={v}" for k, v in zip(self.partition_cols, gid)]
             self._write_meta(gdf.drop(self.partition_cols), fun, hive_names, True)
 

@@ -37,4 +37,20 @@ def test_import(tmp_path, id_col, comp):
         shack.replace_records(df)
         assert shack.get_full_df().shape[0] == df.shape[0]
 
-    assert next(shack.dfs).shape[0]
+    some_dfs = False
+    for _df in shack.dfs:
+        assert _df.shape[0] > 0
+        some_dfs = True
+    assert some_dfs
+
+    n2 = 5678
+    df2 = pl.DataFrame(
+        {
+            "A": [rng.random() for _ in range(n2)],
+            "B": [rng.randint(0, 19) for _ in range(n2)],
+            "C": [rng.choice(byte_set) for _ in range(n2)],
+        }
+    )
+
+    shack.extend(df2)
+    assert shack.get_full_df().shape[0] == (n + n2)
