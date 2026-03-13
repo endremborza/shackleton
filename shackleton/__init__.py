@@ -1,5 +1,7 @@
-"""Polars based database"""
+"""Polars-based persistent tabular store backed by Parquet or Arrow IPC files."""
 
-from .core import TableShack  # noqa: F401
+from .core import DfBatchWriter, HashPartitioner, RecordWriter, TableRepo  # noqa: F401
 
-__version__ = "0.0.2"
+TableShack = TableRepo  # backward-compat alias
+
+__version__ = "1.0.0"

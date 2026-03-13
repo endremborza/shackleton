@@ -4,12 +4,8 @@ dynamic = ["version", "description"]
 authors = [{name = "Endre Márk Borza", email = "endremborza@gmail.com"}]
 license = {file = "LICENSE"}
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = ["polars"]
-
-[project.optional-dependencies]
-test = ["branthebuilder"]
-doc = ["branthebuilder[doc]"]
 
 [project.urls]
 Homepage = "https://github.com/endremborza/shackleton"
@@ -18,5 +14,13 @@ Homepage = "https://github.com/endremborza/shackleton"
 requires = ["flit_core >=3.2,<4"]
 build-backend = "flit_core.buildapi"
 
-[tool.branb]
-line-length = 88
+[tool.pytest.ini_options]
+testpaths = ["shackleton/tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
