@@ -210,6 +210,57 @@ result = (
 
 ---
 
+## Parallel partition processing with `map_partitions`
+
+Apply a function to each partition's collected DataFrame in parallel. All files
+within a partition are combined before your function is called, so it always
+receives one complete DataFrame per partition.
+
+```python
+repo = TableRepo(Path("/tmp/events"), partition_cols=["region"])
+repo.extend(pl.DataFrame({
+    "region": ["us", "us", "eu", "eu", "ap"],
+    "revenue": [100.0, 200.0, 150.0, 50.0, 300.0],
+}))
+
+# Sequential (workers=None, default)
+totals = repo.map_partitions(lambda df: df["revenue"].sum())
+# e.g. [300.0, 200.0, 300.0]  — one value per partition
+
+# Parallel with auto-detected thread count
+totals = repo.map_partitions(lambda df: df["revenue"].sum(), workers=0)
+
+# Parallel with fixed thread pool
+totals = repo.map_partitions(lambda df: df["revenue"].sum(), workers=4)
+```
+
+The `workers` parameter controls parallelism:
+
+| `workers` | Behaviour |
+|---|---|
+| `None` | Sequential — no thread pool |
+| `0` | Thread pool sized to `os.cpu_count()` |
+| `> 0` | Thread pool of exactly that size |
+
+Because polars I/O releases the GIL, threads overlap on I/O with no contention.
+
+The function can return any type; results preserve partition order.
+
+```python
+# Compute per-partition summary stats
+def summarise(df: pl.DataFrame) -> dict:
+    return {"n": len(df), "mean": df["revenue"].mean()}
+
+stats = repo.map_partitions(summarise, workers=0)
+# [{"n": 2, "mean": 150.0}, {"n": 2, "mean": 100.0}, {"n": 1, "mean": 300.0}]
+
+# Collect into a single DataFrame
+import polars as pl
+result = pl.DataFrame(repo.map_partitions(summarise, workers=0))
+```
+
+---
+
 ## Performance
 
 Benchmarked on a single core, NVMe SSD, 1 million rows (4 columns: i64, f64, str, str).
