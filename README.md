@@ -92,10 +92,30 @@ df = repo.get_full_df()
 
 ---
 
+## Deduplication with `dedup_cols`
+
+When `dedup_cols` is set, each `extend` drops duplicate rows on those columns
+after merging with existing data — only the first occurrence is kept. Combine
+with `id_col` for sorted-merge dedup; use alone for unordered dedup.
+Not supported with `max_records > 0` (raises at construction time).
+
+```python
+repo = TableRepo(Path("/tmp/events"), dedup_cols=["event_id"])
+
+repo.extend(pl.DataFrame({"event_id": [1, 2, 3], "val": [10, 20, 30]}))
+# Re-ingest with overlapping IDs — existing rows are kept, new ones appended
+repo.extend(pl.DataFrame({"event_id": [2, 4], "val": [99, 40]}))
+
+repo.get_full_df().shape  # (4, 2) — event_id 2 kept once
+```
+
+---
+
 ## Sorted merge with `id_col`
 
-When `id_col` is set, each extend keeps the file sorted by that column and
-`replace_records` does an upsert: matching IDs are updated, new IDs appended.
+When `id_col` is set, each extend keeps the file sorted by that column
+(when `max_records == 0`) and `replace_records` does an upsert: matching IDs
+are updated, new IDs appended.
 
 ```python
 repo = TableRepo(Path("/tmp/prices"), id_col="ticker")
@@ -176,6 +196,41 @@ repo.extend(pl.DataFrame({"a": [5], "c": [6]}))        # new column c
 
 df = repo.get_full_df()
 # shape: (3, 3) — columns a, b, c — nulls where data didn't exist
+```
+
+---
+
+## Partition-level overwrite
+
+`replace_partition` atomically clears and rewrites only the partitions covered
+by the DataFrame. `purge_partition` deletes matching files without rewriting.
+
+```python
+repo = TableRepo(Path("/tmp/events"), partition_cols=["date"])
+repo.extend(pl.DataFrame({
+    "date": ["2024-01-01", "2024-01-01", "2024-01-02"],
+    "val":  [1, 2, 3],
+}))
+
+# Replace just the 2024-01-01 partition with corrected data
+repo.replace_partition(pl.DataFrame({
+    "date": ["2024-01-01"],
+    "val":  [99],
+}))
+
+# Or wipe it without rewriting
+repo.purge_partition({"date": "2024-01-01"})
+```
+
+---
+
+## Compression
+
+Control the codec and, for Parquet, the compression level.
+
+```python
+repo = TableRepo(Path("/tmp/data"), compression="zstd", compression_level=3)
+repo_ipc = TableRepo(Path("/tmp/fast"), ipc=True, compression="lz4")
 ```
 
 ---
