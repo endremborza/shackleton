@@ -544,6 +544,123 @@ def test_compact_ipc(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# dedup_cols
+# ---------------------------------------------------------------------------
+
+
+def test_dedup_cols_max_records_raises(tmp_path):
+    with pytest.raises(ValueError, match="dedup_cols"):
+        TableRepo(tmp_path / "data", dedup_cols=["id"], max_records=100)
+
+
+def test_dedup_cols_initial_write(tmp_path):
+    repo = TableRepo(tmp_path / "data", dedup_cols=["id"])
+    repo.extend(pl.DataFrame({"id": [1, 1, 2], "val": [10, 99, 20]}))
+    assert repo.get_full_df().shape[0] == 2
+
+
+def test_dedup_cols_extend(tmp_path):
+    repo = TableRepo(tmp_path / "data", dedup_cols=["id"])
+    repo.extend(pl.DataFrame({"id": [1, 2, 3], "val": [10, 20, 30]}))
+    repo.extend(pl.DataFrame({"id": [2, 4], "val": [99, 40]}))
+    assert repo.get_full_df().shape[0] == 4  # id=2 deduped
+
+
+def test_dedup_cols_with_id_col(tmp_path):
+    repo = TableRepo(tmp_path / "data", id_col="id", dedup_cols=["id"])
+    repo.extend(pl.DataFrame({"id": [1, 2], "val": [10, 20]}))
+    repo.extend(pl.DataFrame({"id": [2, 3], "val": [99, 30]}))
+    assert repo.get_full_df().sort("id").shape[0] == 3  # id=2 deduped
+
+
+# ---------------------------------------------------------------------------
+# id_col sorted merge on extend
+# ---------------------------------------------------------------------------
+
+
+def test_extend_twice_with_id_col(tmp_path):
+    repo = TableRepo(tmp_path / "data", id_col="id")
+    repo.extend(pl.DataFrame({"id": [1, 3], "val": [10, 30]}))
+    repo.extend(pl.DataFrame({"id": [2, 4], "val": [20, 40]}))
+    assert repo.get_full_df()["id"].to_list() == [1, 2, 3, 4]
+
+
+# ---------------------------------------------------------------------------
+# compression_level
+# ---------------------------------------------------------------------------
+
+
+def test_compression_level(tmp_path):
+    repo = TableRepo(tmp_path / "data", compression="zstd", compression_level=1)
+    repo.extend(make_df(20))
+    assert repo.get_full_df().shape[0] == 20
+
+
+# ---------------------------------------------------------------------------
+# purge_partition / replace_partition
+# ---------------------------------------------------------------------------
+
+
+def test_purge_partition(tmp_path):
+    repo = TableRepo(tmp_path / "data", partition_cols=["C"])
+    repo.extend(make_df(90))
+    x_count = repo.get_partition_df({"C": "x"}).shape[0]
+    repo.purge_partition({"C": "x"})
+    result = repo.get_full_df()
+    assert result.filter(pl.col("C") == "x").shape[0] == 0
+    assert result.shape[0] == 90 - x_count
+
+
+def test_purge_partition_no_match(tmp_path):
+    repo = TableRepo(tmp_path / "data", partition_cols=["C"])
+    repo.extend(make_df(30))
+    n = repo.get_full_df().shape[0]
+    repo.purge_partition({"C": "nonexistent"})
+    assert repo.get_full_df().shape[0] == n
+
+
+def test_replace_partition_basic(tmp_path):
+    repo = TableRepo(tmp_path / "data", partition_cols=["C"])
+    repo.extend(make_df(90))
+    repo.replace_partition(pl.DataFrame({"A": [9.0], "B": [5], "C": ["x"]}))
+    x_rows = repo.get_full_df().filter(pl.col("C") == "x")
+    assert x_rows.shape[0] == 1
+    assert x_rows["A"][0] == 9.0
+
+
+def test_replace_partition_no_partition_raises(tmp_path):
+    repo = TableRepo(tmp_path / "data")
+    with pytest.raises(ValueError, match="partition_cols"):
+        repo.replace_partition(pl.DataFrame({"A": [1]}))
+
+
+def test_replace_partition_with_max_records(tmp_path):
+    repo = TableRepo(tmp_path / "data", partition_cols=["C"], max_records=5)
+    repo.extend(make_df(90))
+    repo.replace_partition(
+        pl.DataFrame({"A": [1.0, 2.0], "B": [1, 2], "C": ["x", "x"]})
+    )
+    assert repo.get_full_df().filter(pl.col("C") == "x").shape[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# get_partition_lf edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_get_partition_lf_no_match(tmp_path):
+    repo = TableRepo(tmp_path / "data", partition_cols=["C"])
+    repo.extend(make_df(30))
+    assert repo.get_partition_lf({"C": "nonexistent"}).collect().shape[0] == 0
+
+
+def test_get_partition_lf_no_partition_cols(tmp_path):
+    repo = TableRepo(tmp_path / "data")
+    repo.extend(make_df(10))
+    assert repo.get_partition_lf({}).collect().shape[0] == 0
+
+
+# ---------------------------------------------------------------------------
 
 
 def test_large_extend_performance(tmp_path):
