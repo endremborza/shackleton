@@ -4,4 +4,4 @@ from .core import DfBatchWriter, HashPartitioner, RecordWriter, TableRepo  # noq
 
 TableShack = TableRepo  # backward-compat alias
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
