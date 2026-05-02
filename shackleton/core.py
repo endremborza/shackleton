@@ -3,7 +3,7 @@ import fcntl
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from functools import cached_property, partial
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Callable, Iterable, TypeVar
 
@@ -76,7 +76,12 @@ class TableRepo:
     Args:
         root_path: Root directory for all data files.
         id_col: Column used as a unique row identifier. Required for
-            ``replace_records``; enables sorted merge on extend.
+            ``replace_records``; enables sorted merge on ``extend`` when
+            ``max_records == 0`` (no effect on the per-file append path).
+        dedup_cols: Columns forming a composite dedup key. When set, ``extend``
+            drops duplicates after merging with existing data. Only effective
+            when ``max_records == 0``; raises ``ValueError`` otherwise.
+            ``replace_records`` still requires a scalar ``id_col``.
         partition_cols: Column name(s) to partition by, or a
             ``HashPartitioner`` for hash-based bucketing. Partition values
             are encoded as hive-style directories (``col=val/``).
@@ -86,14 +91,22 @@ class TableRepo:
         ipc: Use Arrow IPC format instead of Parquet.
         compression: Compression codec passed to the writer
             (e.g. ``"zstd"``, ``"gzip"``). ``None`` uses the writer default.
+        compression_level: Compression level for Parquet writers. ``None`` uses
+            the codec default. Ignored for Arrow IPC.
     """
 
     root_path: Path
     id_col: str | None = None
+    dedup_cols: list[str] | None = None
     partition_cols: list[str] | HashPartitioner = field(default_factory=list)
     max_records: int = 0
     ipc: bool = False
     compression: str | None = None
+    compression_level: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.dedup_cols and self.max_records:
+            raise ValueError("dedup_cols is not supported with max_records > 0")
 
     @cached_property
     def extension(self) -> str:
@@ -118,6 +131,20 @@ class TableRepo:
         """Purge and rewrite entirely with ``df``."""
         self.purge()
         self.extend(df)
+
+    def purge_partition(self, partition_values: dict[str, Any]) -> None:
+        """Delete all files in the matching partition(s)."""
+        for d in {p.parent for p in self._partition_paths(partition_values)}:
+            self._purge_dir(d)
+
+    def replace_partition(self, df: pl.DataFrame) -> None:
+        """Overwrite the partition(s) covered by ``df``, deleting existing files first.
+
+        ``df`` must contain the partition column(s).
+        """
+        if not self._part_keys:
+            raise ValueError("replace_partition requires partition_cols to be set")
+        self._for_each_partition(df, self._replace_partition_dir)
 
     def purge(self) -> None:
         """Delete all data files."""
@@ -265,15 +292,30 @@ class TableRepo:
 
     def _write(self, df: pl.DataFrame, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_fn = pl.DataFrame.write_ipc if self.ipc else pl.DataFrame.write_parquet
+        kw: dict = {}
         if self.compression:
-            write_fn = partial(write_fn, compression=self.compression)
-        write_fn(df, path)
+            kw["compression"] = self.compression
+        if self.ipc:
+            df.write_ipc(path, **kw)
+        else:
+            if self.compression_level is not None:
+                kw["compression_level"] = self.compression_level
+            df.write_parquet(path, **kw)
 
     def _merge_extend(self, new: pl.LazyFrame, old: pl.LazyFrame) -> pl.LazyFrame:
         if self.id_col:
-            return old.merge_sorted(new.sort(self.id_col), key=self.id_col)
-        return pl.concat([old, new], how="diagonal")
+            out = old.merge_sorted(new.sort(self.id_col), key=self.id_col)
+        else:
+            out = pl.concat([old, new], how="diagonal")
+        if self.dedup_cols:
+            # when id_col is set, merge_sorted makes dupes adjacent; keep="first"
+            # with maintain_order=True then runs in O(n) and preserves sort
+            out = out.unique(
+                subset=self.dedup_cols,
+                keep="first" if self.id_col else "any",
+                maintain_order=bool(self.id_col),
+            )
+        return out
 
     def _merge_replace(self, new: pl.LazyFrame, old: pl.LazyFrame) -> pl.LazyFrame:
         return (
@@ -308,10 +350,23 @@ class TableRepo:
             else:
                 path = self._single_path(root)
                 if not path.exists():
-                    out = df.sort(self.id_col) if self.id_col else df
+                    out = df
+                    if self.dedup_cols:
+                        out = out.unique(subset=self.dedup_cols, maintain_order=False)
+                    if self.id_col:
+                        out = out.sort(self.id_col)
                 else:
                     out = self._merge_extend(df.lazy(), self._lazy_read(path)).collect()
                 self._write(out, path)
+
+    def _purge_dir(self, root: Path) -> None:
+        with _dir_lock(str(root)):
+            for p in root.glob("*" + self.extension):
+                p.unlink()
+
+    def _replace_partition_dir(self, df: pl.DataFrame, root: Path) -> None:
+        self._purge_dir(root)
+        self._extend_dir(df, root)
 
     def _replace_dir(self, df: pl.DataFrame, root: Path) -> None:
         with _dir_lock(str(root)):
