@@ -10,4 +10,4 @@ from .core import (  # noqa: F401
 
 TableShack = TableRepo  # backward-compat alias
 
-__version__ = "1.2.0"
+__version__ = "2.0.0"
