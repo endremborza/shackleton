@@ -1,3 +1,12 @@
+## v2.0.1
+
+- Fixed composite-key merges to be order-exact: stored rows now reliably come before incoming ones on equal keys, where polars' streaming engine could previously reorder ties.
+- Fixed `replace_records` to work against a partition with no stored data yet.
+- Writes are now atomic: data is staged to a temp file and moved into place with `os.replace`, so a crash mid-merge can no longer leave a partially-written file.
+- Fixed partitions to be flagged sorted on read only when they are a single file, since appended parts are unsorted and were previously mis-flagged.
+
+---
+
 ## v2.0.0
 
 - **Breaking:** requires polars ≥2; existing `HashPartitioner` stores built under older polars versions will raise `HashDriftError` on their next bucket-addressed operation until migrated.
