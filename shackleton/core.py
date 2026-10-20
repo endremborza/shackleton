@@ -316,47 +316,73 @@ class TableRepo:
 
     # --- internals ---
 
+    def _concat_lf(self, paths: Iterable[Path]) -> pl.LazyFrame:
+        paths = list(paths)
+        if not paths:
+            return pl.LazyFrame()
+        return pl.concat(map(self._lazy_read, paths), how="diagonal")
+
     def _lazy_read(self, path: Path) -> pl.LazyFrame:
         lf = (
             pl.scan_ipc(path)
             if self.ipc
             else pl.scan_parquet(path, hive_partitioning=False)
         )
-        return lf.set_sorted(self.id_col) if self.id_col else lf
+        # only single-file partitions stay sorted; the append path does not sort
+        return (
+            lf.set_sorted(self.id_cols) if self.id_cols and not self.max_records else lf
+        )
 
-    def _write(self, df: pl.DataFrame, path: Path) -> None:
+    def _write(self, data: pl.DataFrame | pl.LazyFrame, path: Path) -> None:
+        """Write atomically; a LazyFrame (a merge with stored data) is streamed."""
         path.parent.mkdir(parents=True, exist_ok=True)
+        staged = path.with_name(path.name + ".tmp")
         kw: dict = {}
         if self.compression:
             kw["compression"] = self.compression
-        if self.ipc:
-            df.write_ipc(path, **kw)
+        if not self.ipc and self.compression_level is not None:
+            kw["compression_level"] = self.compression_level
+        if isinstance(data, pl.LazyFrame):
+            (data.sink_ipc if self.ipc else data.sink_parquet)(staged, **kw)
         else:
-            if self.compression_level is not None:
-                kw["compression_level"] = self.compression_level
-            df.write_parquet(path, **kw)
+            (data.write_ipc if self.ipc else data.write_parquet)(staged, **kw)
+        os.replace(staged, path)
+
+    def _sort(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        return lf.sort(self.id_cols, maintain_order=True)
 
     def _merge_extend(self, new: pl.LazyFrame, old: pl.LazyFrame) -> pl.LazyFrame:
-        if self.id_col:
-            out = old.merge_sorted(new.sort(self.id_col), key=self.id_col)
+        if self.id_cols:
+            out = old.merge_sorted(
+                self._sort(new), key=self.id_cols, maintain_order=True
+            )
         else:
             out = pl.concat([old, new], how="diagonal")
         if self.dedup_cols:
-            # when id_col is set, merge_sorted makes dupes adjacent; keep="first"
-            # with maintain_order=True then runs in O(n) and preserves sort
+            # an ordered merge puts stored rows before incoming ones on equal keys,
+            # so keep="first" keeps the stored row and maintain_order the sort
             out = out.unique(
                 subset=self.dedup_cols,
-                keep="first" if self.id_col else "any",
-                maintain_order=bool(self.id_col),
+                keep="first" if self.id_cols else "any",
+                maintain_order=bool(self.id_cols),
             )
         return out
 
-    def _merge_replace(self, new: pl.LazyFrame, old: pl.LazyFrame) -> pl.LazyFrame:
-        return (
-            old.merge_sorted(new.sort(self.id_col), key=self.id_col)
-            .unique(subset=self.id_col, keep="last")
-            .sort(self.id_col)
+    def _merge_replace(
+        self, new: pl.LazyFrame, old: pl.LazyFrame | None
+    ) -> pl.LazyFrame:
+        merged = (
+            self._sort(new)
+            if old is None
+            else old.merge_sorted(
+                self._sort(new), key=self.id_cols, maintain_order=True
+            )
         )
+        # sorted, so a key's rows are adjacent: keep the last row of each run
+        last_of_run = pl.any_horizontal(
+            pl.col(c).ne_missing(pl.col(c).shift(-1)) for c in self.id_cols
+        )
+        return merged.filter(last_of_run)
 
     def _for_each_partition(self, df: pl.DataFrame, handler: Callable) -> None:
         keys = self._part_keys
