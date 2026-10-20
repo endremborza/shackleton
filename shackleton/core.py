@@ -12,6 +12,13 @@ import polars as pl
 T = TypeVar("T")
 
 FILE_NAME = "data"
+HASH_CHECK_DIRS = 8
+HASH_CHECK_ROWS = 64
+
+
+class HashDriftError(Exception):
+    """Stored rows sit in buckets the installed polars no longer hashes them to."""
+
 
 _PATH_LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_LOCK = threading.Lock()
@@ -44,7 +51,11 @@ def _dir_lock(path_str: str):
 class HashPartitioner:
     """Partition rows by hashing a column into `num_groups` zero-padded buckets.
 
-    Uses polars' native xxhash for vectorised, GIL-free partitioning.
+    Uses polars' ``Series.hash`` for vectorised, GIL-free partitioning. That hash
+    is not stable across polars versions while bucket assignment is persisted on
+    disk, so ``TableRepo`` samples stored rows before its first bucket-addressed
+    operation and raises ``HashDriftError`` if they no longer hash to their bucket;
+    ``TableRepo.rehash`` rewrites the layout.
     The computed column (``key``) is stripped before writing to files.
     """
 
@@ -151,14 +162,31 @@ class TableRepo:
         for p in self.paths:
             p.unlink()
 
+    def rehash(self) -> None:
+        """Move every row of a ``HashPartitioner`` store into the bucket the
+        installed polars hashes it to — the fix for ``HashDriftError``.
+
+        Builds the new layout in a sibling ``<root>.rehash`` directory and swaps
+        it in. Holds the whole store in memory; assumes no concurrent writers.
+        """
+        if self._hasher is None:
+            raise ValueError("rehash requires a HashPartitioner")
+        staging = self.root_path.with_name(self.root_path.name + ".rehash")
+        if staging.exists():
+            raise FileExistsError(f"{staging} left by an interrupted rehash")
+        df = self.get_full_df()
+        if df.is_empty():
+            return
+        replace(self, root_path=staging).extend(df)
+        shutil.rmtree(self.root_path)
+        staging.rename(self.root_path)
+        self._buckets_verified = True
+
     # --- read ---
 
     def get_full_lf(self) -> pl.LazyFrame:
         """Lazy frame over all data in the store."""
-        parts = list(self.paths)
-        if not parts:
-            return pl.LazyFrame()
-        return pl.concat(map(self._lazy_read, parts), how="diagonal")
+        return self._concat_lf(self.paths)
 
     def get_full_df(self) -> pl.DataFrame:
         """Collect all data into a single DataFrame."""
@@ -330,17 +358,36 @@ class TableRepo:
             handler(df, self.root_path)
             return
 
-        is_hash = isinstance(self.partition_cols, HashPartitioner)
-        if is_hash:
-            df = self.partition_cols.add_to_df(df)
+        hasher = self._hasher
+        if hasher is not None:
+            self._verify_buckets(hasher)
+            df = hasher.add_to_df(df)
 
         for group_vals, group_df in df.group_by(keys):
             group_vals = group_vals if isinstance(group_vals, tuple) else (group_vals,)
             hive_parts = [f"{k}={v}" for k, v in zip(keys, group_vals)]
             part_dir = Path(self.root_path, *hive_parts)
-            if is_hash:
+            if hasher is not None:
                 group_df = group_df.drop(keys)
             handler(group_df, part_dir)
+
+    def _verify_buckets(self, hasher: HashPartitioner) -> None:
+        if self._buckets_verified:
+            return
+        for d in self._partition_dirs[:HASH_CHECK_DIRS]:
+            bucket = d.name.split("=", 1)[1]
+            sample = (
+                self._lazy_read(next(d.glob("*" + self.extension)))
+                .select(hasher.col)
+                .head(HASH_CHECK_ROWS)
+                .collect()
+            )
+            if (hasher.add_to_df(sample)[hasher.key] != bucket).any():
+                raise HashDriftError(
+                    f"{self.root_path}: rows of bucket {bucket} hash elsewhere under "
+                    f"polars {pl.__version__}; rewrite with TableRepo.rehash()"
+                )
+        self._buckets_verified = True
 
     def _extend_dir(self, df: pl.DataFrame, root: Path) -> None:
         with _dir_lock(str(root)):
@@ -406,6 +453,8 @@ class TableRepo:
         keys = self._part_keys
         if not keys:
             return []
+        if self._hasher is not None:
+            self._verify_buckets(self._hasher)
         g = "/".join(f"{c}={partitions.get(c, '*')}" for c in keys)
         return self.root_path.glob(f"{g}/*{self.extension}")
 
@@ -424,11 +473,16 @@ class TableRepo:
         return result
 
     @cached_property
+    def _hasher(self) -> HashPartitioner | None:
+        pc = self.partition_cols
+        return pc if isinstance(pc, HashPartitioner) else None
+
+    @cached_property
     def _part_keys(self) -> list[str]:
         if not self.partition_cols:
             return []
-        if isinstance(self.partition_cols, HashPartitioner):
-            return [self.partition_cols.key]
+        if self._hasher is not None:
+            return [self._hasher.key]
         return list(self.partition_cols)
 
 

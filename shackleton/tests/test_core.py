@@ -5,7 +5,7 @@ from base64 import b16encode
 import polars as pl
 import pytest
 
-from shackleton import HashPartitioner, TableRepo
+from shackleton import HashDriftError, HashPartitioner, TableRepo
 
 
 def make_df(n: int, seed: int = 0) -> pl.DataFrame:
@@ -321,6 +321,26 @@ def test_hash_partitioner_extend_twice(tmp_path):
     repo.extend(df)
     repo.extend(df)
     assert repo.get_full_df().shape[0] == 60
+
+
+def test_hash_drift_raises_until_rehash(tmp_path, monkeypatch):
+    hp = HashPartitioner("id", num_groups=4)
+    df = pl.DataFrame({"id": range(100), "val": 0})
+    TableRepo(tmp_path / "data", id_col="id", partition_cols=hp).extend(df)
+
+    upgraded = pl.Expr.hash
+    monkeypatch.setattr(pl.Expr, "hash", lambda e, seed=0: upgraded(e, seed + 1))
+    repo = TableRepo(tmp_path / "data", id_col="id", partition_cols=hp)
+    assert repo.get_full_df().shape[0] == 100  # full reads are layout-agnostic
+    with pytest.raises(HashDriftError):
+        repo.replace_records(df.with_columns(val=pl.lit(1)))
+    with pytest.raises(HashDriftError):
+        repo.get_partition_df({hp.key: "0"})
+
+    repo.rehash()
+    fresh = TableRepo(tmp_path / "data", id_col="id", partition_cols=hp)
+    fresh.replace_records(df.with_columns(val=pl.lit(1)))
+    assert fresh.get_full_df().sort("id")["val"].to_list() == [1] * 100
 
 
 # ---------------------------------------------------------------------------

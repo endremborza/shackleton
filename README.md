@@ -4,7 +4,7 @@
 
 Persistent tabular store backed by Parquet or Arrow IPC, built on [polars](https://pola.rs).
 
-- **Partitioned writes** — by column value or xxhash bucket
+- **Partitioned writes** — by column value or hash bucket
 - **Sorted merge** — maintain sorted order on extend via `id_col`
 - **Lazy reads** — returns `pl.LazyFrame` so polars can push down predicates
 - **Schema evolution** — diagonal concat handles mismatched columns transparently
@@ -73,7 +73,7 @@ df_eu = repo.get_partition_df({"region": "eu"})
 ## Hash partitioning
 
 When partition values have unbounded cardinality, hash into fixed buckets instead.
-Uses polars' native xxhash — vectorised, GIL-free.
+Uses polars' `Series.hash` — vectorised, GIL-free. That hash is not stable across polars versions while bucket assignment lives on disk, so before its first bucket-addressed operation (a write, `get_partition_*`, `purge_partition`) a repo samples stored rows and raises `HashDriftError` if they no longer hash to their bucket. `repo.rehash()` moves every row into its current bucket.
 
 ```python
 from shackleton import HashPartitioner
