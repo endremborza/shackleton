@@ -6,7 +6,7 @@ authors = [{name = "Endre Márk Borza", email = "endremborza@gmail.com"}]
 license = {file = "LICENSE"}
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["polars"]
+dependencies = ["polars>=2"]
 
 [project.urls]
 Homepage = "https://github.com/endremborza/shackleton"
