@@ -1,8 +1,10 @@
 import contextlib
 import fcntl
+import os
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
 from typing import Any, Callable, Iterable, TypeVar
@@ -86,13 +88,15 @@ class TableRepo:
 
     Args:
         root_path: Root directory for all data files.
-        id_col: Column used as a unique row identifier. Required for
-            ``replace_records``; enables sorted merge on ``extend`` when
-            ``max_records == 0`` (no effect on the per-file append path).
+        id_col: Column, or columns in sort order, identifying a row. Required
+            for ``replace_records``; enables sorted merge on ``extend`` when
+            ``max_records == 0`` (no effect on the per-file append path). On
+            equal keys, stored rows precede incoming ones and a batch keeps
+            its own order: ``replace_records`` keeps the batch's last row.
         dedup_cols: Columns forming a composite dedup key. When set, ``extend``
-            drops duplicates after merging with existing data. Only effective
-            when ``max_records == 0``; raises ``ValueError`` otherwise.
-            ``replace_records`` still requires a scalar ``id_col``.
+            drops duplicates after merging with existing data, keeping the
+            stored row when ``id_col`` is set. Only effective when
+            ``max_records == 0``; raises ``ValueError`` otherwise.
         partition_cols: Column name(s) to partition by, or a
             ``HashPartitioner`` for hash-based bucketing. Partition values
             are encoded as hive-style directories (``col=val/``).
@@ -107,13 +111,14 @@ class TableRepo:
     """
 
     root_path: Path
-    id_col: str | None = None
+    id_col: str | list[str] | None = None
     dedup_cols: list[str] | None = None
     partition_cols: list[str] | HashPartitioner = field(default_factory=list)
     max_records: int = 0
     ipc: bool = False
     compression: str | None = None
     compression_level: int | None = None
+    _buckets_verified: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.dedup_cols and self.max_records:
@@ -122,6 +127,13 @@ class TableRepo:
     @cached_property
     def extension(self) -> str:
         return ".arrow" if self.ipc else ".parquet"
+
+    @cached_property
+    def id_cols(self) -> list[str]:
+        """``id_col`` as a list; empty when unset."""
+        if self.id_col is None:
+            return []
+        return [self.id_col] if isinstance(self.id_col, str) else list(self.id_col)
 
     # --- write ---
 
@@ -135,7 +147,7 @@ class TableRepo:
         Requires ``id_col`` to be set. For multi-file partitions
         (``max_records > 0``) performs a full read-merge-rewrite.
         """
-        assert self.id_col is not None, "replace_records requires id_col"
+        assert self.id_cols, "replace_records requires id_col"
         self._for_each_partition(df, self._replace_dir)
 
     def replace_all(self, df: pl.DataFrame) -> None:
@@ -199,10 +211,7 @@ class TableRepo:
         For ``HashPartitioner`` repos, use ``repo.partition_cols.key``
         as the dict key with the zero-padded bucket string as the value.
         """
-        paths = list(self._partition_paths(partitions))
-        if not paths:
-            return pl.LazyFrame()
-        return pl.concat(map(self._lazy_read, paths), how="diagonal")
+        return self._concat_lf(self._partition_paths(partitions))
 
     def get_partition_df(self, partitions: dict[str, Any]) -> pl.DataFrame:
         """Collect partitions matching ``partitions`` dict into a DataFrame."""
@@ -211,9 +220,9 @@ class TableRepo:
     # --- iteration ---
 
     @property
-    def paths(self) -> Iterable[Path]:
-        """All data file paths in the store."""
-        return self.root_path.glob("**/*" + self.extension)
+    def paths(self) -> list[Path]:
+        """All data file paths in the store, sorted so reads are deterministic."""
+        return sorted(self.root_path.glob("**/*" + self.extension))
 
     @property
     def n_files(self) -> int:
@@ -276,8 +285,7 @@ class TableRepo:
 
         def _apply(d: Path) -> T:
             files = sorted(d.glob("*" + self.extension))
-            lf = pl.concat([self._lazy_read(f) for f in files], how="diagonal")
-            return fn(lf.collect())
+            return fn(self._concat_lf(files).collect())
 
         if workers is None:
             return [_apply(d) for d in dirs]
@@ -297,9 +305,7 @@ class TableRepo:
                 files = sorted(d.glob("*" + self.extension))
                 if len(files) <= 1:
                     continue
-                df = pl.concat(
-                    [self._lazy_read(f) for f in files], how="diagonal"
-                ).collect()
+                df = self._concat_lf(files).collect()
                 for f in files:
                     f.unlink()
                 for idx, offset in enumerate(range(0, max(len(df), 1), target_rows)):
@@ -400,11 +406,13 @@ class TableRepo:
                     out = df
                     if self.dedup_cols:
                         out = out.unique(subset=self.dedup_cols, maintain_order=False)
-                    if self.id_col:
-                        out = out.sort(self.id_col)
+                    if self.id_cols:
+                        out = out.sort(self.id_cols, maintain_order=True)
+                    self._write(out, path)
                 else:
-                    out = self._merge_extend(df.lazy(), self._lazy_read(path)).collect()
-                self._write(out, path)
+                    self._write(
+                        self._merge_extend(df.lazy(), self._lazy_read(path)), path
+                    )
 
     def _purge_dir(self, root: Path) -> None:
         with _dir_lock(str(root)):
@@ -418,21 +426,19 @@ class TableRepo:
     def _replace_dir(self, df: pl.DataFrame, root: Path) -> None:
         with _dir_lock(str(root)):
             existing = sorted(root.glob("*" + self.extension))
-            if not existing:
-                self._write(df.sort(self.id_col), self._single_path(root))
-                return
+            old = None
+            if existing:
+                old = self._concat_lf(existing)
+                if self.max_records > 0:
+                    old = self._sort(old)
+            out = self._merge_replace(df.lazy(), old)
             if self.max_records > 0:
-                old = pl.concat(
-                    [self._lazy_read(p) for p in existing], how="diagonal"
-                ).collect()
-                out = self._merge_replace(df.lazy(), old.lazy()).collect()
+                out = out.collect()
                 for p in existing:
                     p.unlink()
                 self._append_parts(out, root, [])
             else:
-                path = existing[0]
-                out = self._merge_replace(df.lazy(), self._lazy_read(path)).collect()
-                self._write(out, path)
+                self._write(out, self._single_path(root))
 
     def _append_parts(self, df: pl.DataFrame, root: Path, existing: list[Path]) -> None:
         if existing:

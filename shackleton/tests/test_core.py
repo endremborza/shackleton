@@ -173,7 +173,16 @@ def test_replace_records_dedup(tmp_path):
     repo.replace_records(pl.DataFrame({"id": [2, 2], "val": [20, 21]}))
     result = repo.get_full_df().sort("id")
     assert result.shape[0] == 3
-    assert result.filter(pl.col("id") == 2)["val"][0] in (20, 21)
+    assert result.filter(pl.col("id") == 2)["val"][0] == 21  # batch's last row wins
+
+
+def test_replace_records_over_duplicate_ids(tmp_path):
+    repo = TableRepo(tmp_path / "data", id_col="id")
+    ids = list(range(10))
+    repo.extend(pl.DataFrame({"id": ids, "val": 1}))
+    repo.extend(pl.DataFrame({"id": ids, "val": 2}))
+    repo.replace_records(pl.DataFrame({"id": ids, "val": 3}))
+    assert repo.get_full_df()["val"].to_list() == [3] * 10
 
 
 def test_replace_records_with_max_records(tmp_path):
@@ -187,10 +196,42 @@ def test_replace_records_with_max_records(tmp_path):
     assert repo.n_files == 2  # 4 rows at max_records=2
 
 
+def test_replace_records_max_records_unsorted_parts(tmp_path):
+    repo = TableRepo(tmp_path / "data", id_col="id", max_records=2)
+    repo.extend(pl.DataFrame({"id": [3, 1, 2], "val": [30, 10, 20]}))
+    repo.replace_records(pl.DataFrame({"id": [1], "val": [100]}))
+    result = repo.get_full_df()
+    assert result["id"].to_list() == [1, 2, 3]
+    assert result["val"].to_list() == [100, 20, 30]
+
+
+def test_composite_id_col(tmp_path):
+    repo = TableRepo(tmp_path / "data", id_col=["a", "b"])
+    repo.extend(pl.DataFrame({"a": [2, 1, 1], "b": [1, 2, 1], "val": [21, 12, 11]}))
+    repo.extend(pl.DataFrame({"a": [1, 2], "b": [3, 0], "val": [13, 20]}))
+    assert repo.get_full_df()["val"].to_list() == [11, 12, 13, 20, 21]
+    repo.replace_records(pl.DataFrame({"a": [1, 3], "b": [2, 0], "val": [-12, 30]}))
+    assert repo.get_full_df()["val"].to_list() == [11, -12, 13, 20, 21, 30]
+
+
 def test_replace_records_empty_repo(tmp_path):
     repo = TableRepo(tmp_path / "data", id_col="id")
     repo.replace_records(pl.DataFrame({"id": [1, 2], "val": [1, 2]}))
     assert repo.get_full_df().shape[0] == 2
+
+
+def test_replace_records_empty_repo_max_records(tmp_path):
+    repo = TableRepo(tmp_path / "data", id_col="id", max_records=2)
+    repo.replace_records(
+        pl.DataFrame({"id": [1, 2, 3, 4, 5], "val": [10, 20, 30, 40, 50]})
+    )
+    assert repo.n_files == 3  # 5 rows at max_records=2 → (2, 2, 1)
+    assert all(p.name.startswith("file-") for p in repo.paths)
+    repo.extend(pl.DataFrame({"id": [6, 7], "val": [60, 70]}))
+    result = repo.get_full_df().sort("id")
+    assert result["id"].to_list() == [1, 2, 3, 4, 5, 6, 7]
+    assert all(p.name.startswith("file-") for p in repo.paths)
+    assert repo.n_files == 4  # 7 rows at max_records=2 → (2, 2, 2, 1)
 
 
 def test_id_col_sorted_merge_on_extend(tmp_path):
@@ -241,6 +282,15 @@ def test_dedup_cols_with_id_col_old_wins(tmp_path):
     assert result["id"].to_list() == [1, 2, 3]
     assert result.filter(pl.col("id") == 2)["val"][0] == 20  # old value kept
     assert result.filter(pl.col("id") == 3)["val"][0] == 30  # new row inserted
+
+
+def test_dedup_cols_old_wins_within_id_col_runs(tmp_path):
+    repo = TableRepo(tmp_path / "data", id_col="g", dedup_cols=["g", "id"])
+    ids = list(range(10))
+    df = pl.DataFrame({"g": [i // 4 for i in ids], "id": ids})
+    repo.extend(df.with_columns(val=pl.lit("stored")))
+    repo.extend(df.with_columns(val=pl.lit("incoming")))
+    assert repo.get_full_df()["val"].to_list() == ["stored"] * 10
 
 
 # ---------------------------------------------------------------------------

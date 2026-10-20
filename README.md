@@ -95,15 +95,15 @@ df = repo.get_full_df()
 ## Deduplication with `dedup_cols`
 
 When `dedup_cols` is set, each `extend` drops duplicate rows on those columns
-after merging with existing data — only the first occurrence is kept. Combine
-with `id_col` for sorted-merge dedup; use alone for unordered dedup.
+after merging with existing data. With `id_col` the merge is sorted and the
+existing (first) row wins; without `id_col` the surviving occurrence is arbitrary.
 Not supported with `max_records > 0` (raises at construction time).
 
 ```python
 repo = TableRepo(Path("/tmp/events"), dedup_cols=["event_id"])
 
 repo.extend(pl.DataFrame({"event_id": [1, 2, 3], "val": [10, 20, 30]}))
-# Re-ingest with overlapping IDs — existing rows are kept, new ones appended
+# Re-ingest with overlapping IDs — duplicates collapse to one row per event_id
 repo.extend(pl.DataFrame({"event_id": [2, 4], "val": [99, 40]}))
 
 repo.get_full_df().shape  # (4, 2) — event_id 2 kept once
@@ -113,9 +113,7 @@ repo.get_full_df().shape  # (4, 2) — event_id 2 kept once
 
 ## Sorted merge with `id_col`
 
-When `id_col` is set, each extend keeps the file sorted by that column
-(when `max_records == 0`) and `replace_records` does an upsert: matching IDs
-are updated, new IDs appended.
+When `id_col` is set, each extend keeps the file sorted by it (when `max_records == 0`) and `replace_records` does an upsert: matching IDs are updated, new IDs appended. `id_col` is a column or a list of columns, sorted in that order. On equal keys stored rows come before incoming ones, and within one `replace_records` batch the last row for a key wins.
 
 ```python
 repo = TableRepo(Path("/tmp/prices"), id_col="ticker")
