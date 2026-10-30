@@ -4,6 +4,7 @@ from .core import (  # noqa: F401
     DfBatchWriter,
     HashDriftError,
     HashPartitioner,
+    NullIdError,
     RecordWriter,
     TableRepo,
 )

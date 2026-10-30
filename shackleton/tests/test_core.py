@@ -5,7 +5,7 @@ from base64 import b16encode
 import polars as pl
 import pytest
 
-from shackleton import HashDriftError, HashPartitioner, TableRepo
+from shackleton import HashDriftError, HashPartitioner, NullIdError, TableRepo
 
 
 def make_df(n: int, seed: int = 0) -> pl.DataFrame:
@@ -501,6 +501,25 @@ def test_schema_mismatch_extend(tmp_path):
     assert full.shape[0] == 3
     assert "B" in full.columns
     assert "C" in full.columns
+
+
+def test_id_col_merges_match_columns_by_name(tmp_path):
+    repo = TableRepo(tmp_path / "data", id_col="id")
+    repo.extend(pl.DataFrame({"id": [1, 3], "a": ["x", "y"], "b": [1.0, 2.0]}))
+    repo.extend(pl.DataFrame({"id": [2], "b": [9.0], "a": ["z"], "c": [7]}))
+    repo.replace_records(pl.DataFrame({"a": ["w"], "id": [3], "b": [None]}))
+    assert repo.get_full_df().to_dicts() == [
+        {"id": 1, "a": "x", "b": 1.0, "c": None},
+        {"id": 2, "a": "z", "b": 9.0, "c": 7},
+        {"id": 3, "a": "w", "b": None, "c": None},
+    ]
+
+
+@pytest.mark.parametrize("method", ["extend", "replace_records"])
+def test_null_ids_raise(tmp_path, method):
+    repo = TableRepo(tmp_path / "data", id_col=["k", "id"])
+    with pytest.raises(NullIdError):
+        getattr(repo, method)(pl.DataFrame({"k": [1, 1], "id": [2, None]}))
 
 
 # ---------------------------------------------------------------------------

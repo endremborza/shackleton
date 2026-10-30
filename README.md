@@ -113,7 +113,7 @@ repo.get_full_df().shape  # (4, 2) — event_id 2 kept once
 
 ## Sorted merge with `id_col`
 
-When `id_col` is set, each extend keeps the file sorted by it (when `max_records == 0`) and `replace_records` does an upsert: matching IDs are updated, new IDs appended. `id_col` is a column or a list of columns, sorted in that order. On equal keys stored rows come before incoming ones, and within one `replace_records` batch the last row for a key wins.
+When `id_col` is set, each extend keeps the file sorted by it (when `max_records == 0`) and `replace_records` does an upsert: matching IDs are updated, new IDs appended. `id_col` is a column or a list of columns, sorted in that order. On equal keys stored rows come before incoming ones, and within one `replace_records` batch the last row for a key wins. Id columns must not be null: a write with a null id raises `NullIdError`.
 
 ```python
 repo = TableRepo(Path("/tmp/prices"), id_col="ticker")

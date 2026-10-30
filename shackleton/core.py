@@ -22,6 +22,10 @@ class HashDriftError(Exception):
     """Stored rows sit in buckets the installed polars no longer hashes them to."""
 
 
+class NullIdError(ValueError):
+    """A written batch has nulls in an ``id_col`` column."""
+
+
 _PATH_LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_LOCK = threading.Lock()
 
@@ -93,6 +97,7 @@ class TableRepo:
             ``max_records == 0`` (no effect on the per-file append path). On
             equal keys, stored rows precede incoming ones and a batch keeps
             its own order: ``replace_records`` keeps the batch's last row.
+            Must not be null: writes raise ``NullIdError``.
         dedup_cols: Columns forming a composite dedup key. When set, ``extend``
             drops duplicates after merging with existing data, keeping the
             stored row when ``id_col`` is set. Only effective when
@@ -388,6 +393,9 @@ class TableRepo:
         return merged.filter(last_of_run)
 
     def _for_each_partition(self, df: pl.DataFrame, handler: Callable) -> None:
+        # polars' streaming merge_sorted misorders null keys on a single key column
+        if null_ids := [c for c in self.id_cols if df[c].null_count()]:
+            raise NullIdError(f"{self.root_path}: nulls in id column(s) {null_ids}")
         keys = self._part_keys
         if not keys:
             handler(df, self.root_path)
