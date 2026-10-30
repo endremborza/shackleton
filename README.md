@@ -184,8 +184,7 @@ with repo.get_replacing_record_writer(batch_size=10_000) as writer:
 
 ## Schema evolution
 
-Columns added in later writes fill missing values with `null` in earlier files.
-No migration step needed.
+Columns added in later writes fill missing values with `null` in earlier files. No migration step needed. The `id_col` merges match columns by name, so a batch may also carry the stored columns in another order.
 
 ```python
 repo = TableRepo(Path("/tmp/evolving"))

@@ -351,11 +351,20 @@ class TableRepo:
     def _sort(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         return lf.sort(self.id_cols, maintain_order=True)
 
+    def _merge_sorted(self, old: pl.LazyFrame, new: pl.LazyFrame) -> pl.LazyFrame:
+        """``old`` and the sorted ``new`` merged on ``id_cols``. ``merge_sorted``
+        matches columns by position, so each side first takes the diagonal union's
+        schema, the one the diagonal concat path writes."""
+        new = self._sort(new)
+        return pl.concat([old, new.clear()], how="diagonal").merge_sorted(
+            pl.concat([old.clear(), new], how="diagonal"),
+            key=self.id_cols,
+            maintain_order=True,
+        )
+
     def _merge_extend(self, new: pl.LazyFrame, old: pl.LazyFrame) -> pl.LazyFrame:
         if self.id_cols:
-            out = old.merge_sorted(
-                self._sort(new), key=self.id_cols, maintain_order=True
-            )
+            out = self._merge_sorted(old, new)
         else:
             out = pl.concat([old, new], how="diagonal")
         if self.dedup_cols:
@@ -371,13 +380,7 @@ class TableRepo:
     def _merge_replace(
         self, new: pl.LazyFrame, old: pl.LazyFrame | None
     ) -> pl.LazyFrame:
-        merged = (
-            self._sort(new)
-            if old is None
-            else old.merge_sorted(
-                self._sort(new), key=self.id_cols, maintain_order=True
-            )
-        )
+        merged = self._sort(new) if old is None else self._merge_sorted(old, new)
         # sorted, so a key's rows are adjacent: keep the last row of each run
         last_of_run = pl.any_horizontal(
             pl.col(c).ne_missing(pl.col(c).shift(-1)) for c in self.id_cols
