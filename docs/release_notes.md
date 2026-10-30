@@ -1,3 +1,11 @@
+## v2.1.0
+
+- `id_col` merges now match columns by name instead of position, so a batch whose columns arrive reordered, or that adds or drops columns, merges correctly instead of merging wrong or failing.
+- Writing a null value into an `id_col` column now raises the new exported `NullIdError` instead of silently misordering the merge.
+- A batch that lands entirely in one partition is no longer re-sorted on write, fixing a case where it lost its already-sorted order.
+
+---
+
 ## v2.0.1
 
 - Fixed composite-key merges to be order-exact: stored rows now reliably come before incoming ones on equal keys, where polars' streaming engine could previously reorder ties.
