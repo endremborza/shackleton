@@ -406,8 +406,11 @@ class TableRepo:
             self._verify_buckets(hasher)
             df = hasher.add_to_df(df)
 
-        for group_vals, group_df in df.group_by(keys):
-            group_vals = group_vals if isinstance(group_vals, tuple) else (group_vals,)
+        # a frame of one partition goes through whole: group_by would gather a copy
+        # and drop its sorted flags, so the write would sort it again
+        single = df.select(pl.struct(keys).n_unique()).item() == 1
+        groups = [(df.select(keys).row(0), df)] if single else df.group_by(keys)
+        for group_vals, group_df in groups:
             hive_parts = [f"{k}={v}" for k, v in zip(keys, group_vals)]
             part_dir = Path(self.root_path, *hive_parts)
             if hasher is not None:
