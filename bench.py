@@ -14,6 +14,12 @@ import polars as pl
 
 from shackleton import HashPartitioner, TableRepo
 
+DEFAULT_ROWS = 1_000_000
+N_CATEGORIES = 26
+N_BUCKETS = 64
+MAX_RECORDS = 10_000
+N_UPSERTS = 10_000
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -23,7 +29,7 @@ def make_df(n: int) -> pl.DataFrame:
         {
             "id": pl.arange(0, n, eager=True),
             "value": pl.Series([float(i) * 1.1 for i in range(n)]),
-            "category": pl.Series([chr(65 + i % 26) for i in range(n)]),
+            "category": pl.Series([chr(65 + i % N_CATEGORIES) for i in range(n)]),
             "tag": pl.Series([f"tag-{i % 100}" for i in range(n)]),
         }
     )
@@ -49,22 +55,42 @@ def bench_extend_single(df: pl.DataFrame, root: Path) -> None:
 
 def bench_extend_with_id(df: pl.DataFrame, root: Path) -> None:
     repo = TableRepo(root / "extend_id", id_col="id")
-    bench("extend + sorted merge (id_col)", lambda: repo.extend(df), scale=len(df))
+    repo.extend(df.with_columns(pl.col("id") * 2))
+    interleaved = df.with_columns(pl.col("id") * 2 + 1)
+    bench(
+        "extend into stored rows (id_col merge)",
+        lambda: repo.extend(interleaved),
+        scale=len(df),
+    )
 
 
 def bench_extend_partitioned(df: pl.DataFrame, root: Path) -> None:
     repo = TableRepo(root / "extend_part", partition_cols=["category"])
-    bench("extend (26 column partitions)", lambda: repo.extend(df), scale=len(df))
+    bench(
+        f"extend ({N_CATEGORIES} column partitions)",
+        lambda: repo.extend(df),
+        scale=len(df),
+    )
 
 
 def bench_extend_hash(df: pl.DataFrame, root: Path) -> None:
-    repo = TableRepo(root / "extend_hash", partition_cols=HashPartitioner("tag", 64))
-    bench("extend (64 hash partitions)", lambda: repo.extend(df), scale=len(df))
+    repo = TableRepo(
+        root / "extend_hash", partition_cols=HashPartitioner("tag", N_BUCKETS)
+    )
+    bench(
+        f"extend ({N_BUCKETS} hash partitions)",
+        lambda: repo.extend(df),
+        scale=len(df),
+    )
 
 
 def bench_extend_max_records(df: pl.DataFrame, root: Path) -> None:
-    repo = TableRepo(root / "extend_max", max_records=10_000)
-    bench("extend (max_records=10k files)", lambda: repo.extend(df), scale=len(df))
+    repo = TableRepo(root / "extend_max", max_records=MAX_RECORDS)
+    bench(
+        f"extend (max_records={MAX_RECORDS:,})",
+        lambda: repo.extend(df),
+        scale=len(df),
+    )
 
 
 def bench_read_full(df: pl.DataFrame, root: Path) -> None:
@@ -87,19 +113,23 @@ def bench_read_partition(df: pl.DataFrame, root: Path) -> None:
     repo = TableRepo(root / "read_part", partition_cols=["category"])
     repo.extend(df)
     bench(
-        "get_partition_df (1 of 26 partitions)",
+        f"get_partition_df (1 of {N_CATEGORIES} partitions)",
         lambda: repo.get_partition_df({"category": "A"}),
-        scale=len(df) // 26,
+        scale=len(df) // N_CATEGORIES,
     )
 
 
 def bench_replace_records(df: pl.DataFrame, root: Path) -> None:
     repo = TableRepo(root / "replace_rec", id_col="id")
     repo.extend(df)
-    updates = df.sample(n=min(10_000, len(df) // 10), seed=42).with_columns(
+    updates = df.sample(n=min(N_UPSERTS, len(df) // 10), seed=42).with_columns(
         pl.col("value") * 2
     )
-    bench("replace_records (10k updates)", lambda: repo.replace_records(updates), scale=len(updates))
+    bench(
+        f"replace_records ({len(updates):,} updates)",
+        lambda: repo.replace_records(updates),
+        scale=len(updates),
+    )
 
 
 def bench_ipc_extend(df: pl.DataFrame, root: Path) -> None:
@@ -119,7 +149,7 @@ def bench_ipc_read(df: pl.DataFrame, root: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--rows", type=int, default=1_000_000)
+    parser.add_argument("--rows", type=int, default=DEFAULT_ROWS)
     args = parser.parse_args()
 
     n = args.rows

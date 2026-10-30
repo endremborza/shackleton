@@ -315,22 +315,4 @@ result = pl.DataFrame(repo.map_partitions(summarise, workers=0))
 
 ## Performance
 
-Benchmarked on a single core, NVMe SSD, 1 million rows (4 columns: i64, f64, str, str).
-Run `uv run bench.py` to reproduce.
-
-| Scenario | Throughput |
-|---|---|
-| extend — single file | ~33M rows/s |
-| extend — sorted merge (`id_col`) | ~49M rows/s |
-| extend — 26 column partitions | ~11M rows/s |
-| extend — 64 hash partitions | ~7M rows/s |
-| extend — `max_records=10k` | ~7M rows/s |
-| extend — IPC format | ~23M rows/s |
-| read full (collect) | ~131M rows/s |
-| read full (lazy + filter) | ~170M rows/s |
-| read single partition (1 of 26) | ~18M rows/s |
-| read full — IPC format | ~102M rows/s |
-| replace_records (10k upserts) | ~107k rows/s |
-
-`replace_records` does a full read-merge-rewrite, so throughput scales with
-existing file size, not batch size. Use partitioned repos to bound the merge scope.
+Throughput per scenario and the known bottlenecks are in [PERF.md](PERF.md); `uv run bench.py` reproduces it.
